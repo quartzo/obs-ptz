@@ -104,11 +104,11 @@ endif()
 
 option(ENABLE_JOYSTICK "Enable Joystick support" ON)
 if(ENABLE_JOYSTICK)
-  find_package(SDL2 COMPONENTS SDL2-static)
+  find_package(SDL2 COMPONENTS SDL2)
   if(SDL2_FOUND)
     add_compile_definitions(ENABLE_JOYSTICK SDL_SUPPORTED)
     target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE ${SDL2_INCLUDE_DIRS})
-    target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE SDL2::SDL2-static)
+    target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE SDL2::SDL2)
     target_sources(
       ${CMAKE_PROJECT_NAME}
       PRIVATE src/imported/qjoysticks/QJoysticks.cpp
