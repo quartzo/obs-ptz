@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.16...3.21)
 
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 # Generate a version number from the git tag
 execute_process(
   COMMAND git describe --tags --dirty
