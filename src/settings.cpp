@@ -295,7 +295,7 @@ void PTZSettings::on_addPTZ_clicked()
     if (action == addUsbCam) {
 		OBSData cfg = obs_data_create();
 		obs_data_release(cfg);
-		obs_data_set_string(cfg, "type", "usbcam");
+		obs_data_set_string(cfg, "type", "usb-cam");
 		ptzDeviceList.make_device(cfg);
 	}
 }

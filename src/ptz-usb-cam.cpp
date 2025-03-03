@@ -6,25 +6,13 @@
 	*/
 
 #include "imported/qt-wrappers.hpp"
+#include <obs-properties.h>
 #include <obs.hpp>
 #include "ptz-usb-cam.hpp"
-
-void sendUVCCommand(obs_source_t* src, const char* control_name, int value) {
-    OBSDataAutoRelease settings = obs_source_get_settings(src);
-    obs_data_set_int(settings, control_name, value);
-    obs_source_update(src, settings);
-}
-
-void sendUVCCommand(obs_source_t* src, const char* control_name, bool value) {
-    OBSDataAutoRelease settings = obs_source_get_settings(src);
-    obs_data_set_bool(settings, control_name, value);
-    obs_source_update(src, settings);
-}
 
 PTZUSBCam::PTZUSBCam(OBSData config) : PTZDevice(config)
 {
 	set_config(config);
-	log_source_settings();
 	obs_data_array_t* presetArray = obs_data_get_array(settings, "presets");
     size_t count = obs_data_array_count(presetArray);
     for (size_t i = 0; i < count; ++i) {
@@ -45,7 +33,7 @@ PTZUSBCam::PTZUSBCam(OBSData config) : PTZDevice(config)
 
 QString PTZUSBCam::description()
 {
-	return QString("PTZ via USB (UVC) %1").arg("Camera 1");
+	return QString("USB CAM (UVC)");
 }
 
 void PTZUSBCam::set_config(OBSData config)
@@ -62,6 +50,8 @@ OBSData PTZUSBCam::get_config()
 obs_properties_t *PTZUSBCam::get_obs_properties()
 {
 	obs_properties_t *ptz_props = PTZDevice::get_obs_properties();
+	obs_properties_remove_by_name(ptz_props, "interface");
+	log_source_settings();
 	return ptz_props;
 }
 
@@ -124,97 +114,60 @@ void PTZUSBCam::zoom_abs(double pos)
 									*/
 }
 
-void PTZUSBCam::memory_reset(int i)
+void PTZUSBCam::memory_reset(int id)
 {
-    /*
-	OnvifPTZService c;
+    if (!presets.contains(id))
+        return;
 
-	QMap<int, QString> presets = c.GetPresets(
-		m_PTZAddress, username, password, m_selectedMedia.token);
-
-	if (presets.find(i) != presets.end())
-		c.RemovePreset(m_PTZAddress, username, password,
-			       m_selectedMedia.token, presets[i]);
-										*/
+    presets.remove(id);
 }
+
+#define PTZ_PAN_ABSOLUTE "Pan Absolute"
+#define PTZ_TILT_ABSOLUTE "Tilt Absolute"
+#define PTZ_ZOOM_ABSOLUTE "Zoom Absolute"
+#define PTZ_FOCUS_AUTO "Focus Auto"
+#define PTZ_FOCUS_ABSOLUTE "Focus Absolute"
+#define PTZ_WHITE_BALANCE_TEMP_AUTO "White Balance Temperature Auto"
+#define PTZ_WHITE_BALANCE_TEMP "White Balance Temperature"
 
 void PTZUSBCam::memory_set(int i)
 {
-    /*
-	OnvifPTZService c;
+    OBSSourceAutoRelease src = obs_get_source_by_name(QT_TO_UTF8(objectName()));
+    if (!src)
+        return;
 
-	QMap<int, QString> presets = c.GetPresets(
-		m_PTZAddress, username, password, m_selectedMedia.token);
-	QString preset = "";
-
-	if (presets.find(i) != presets.end())
-		preset = presets[i];
-
-	c.SetPreset(m_PTZAddress, username, password, m_selectedMedia.token,
-		    preset, i);
-						*/
+    OBSDataAutoRelease settings = obs_source_get_settings(src);
+    PtzUsbCamPreset p;
+    p.pan = static_cast<int>(obs_data_get_int(settings, PTZ_PAN_ABSOLUTE));
+    p.tilt = static_cast<int>(obs_data_get_int(settings, PTZ_TILT_ABSOLUTE));
+    p.zoom = static_cast<int>(obs_data_get_int(settings, PTZ_ZOOM_ABSOLUTE));
+    p.focusAuto = obs_data_get_bool(settings, PTZ_FOCUS_AUTO);
+    p.focus = static_cast<int>(obs_data_get_int(settings, PTZ_FOCUS_ABSOLUTE));
+    p.whitebalAuto = obs_data_get_bool(settings, PTZ_WHITE_BALANCE_TEMP_AUTO);
+    p.temperature = static_cast<int>(obs_data_get_int(settings, PTZ_WHITE_BALANCE_TEMP));
+    presets[i] = p;
 }
 
 void PTZUSBCam::memory_recall(int id)
 {
     if (!presets.contains(id))
         return;
+    const PtzUsbCamPreset& p = presets[id];
 
-    obs_source_t *src =	obs_get_source_by_name(QT_TO_UTF8(objectName()));
+    OBSSourceAutoRelease src = obs_get_source_by_name(QT_TO_UTF8(objectName()));
     if (!src)
         return;
 
-    const PtzUsbCamPreset& p = presets[id];
-    sendUVCCommand(src, "Pan Absolute", p.pan);
-    sendUVCCommand(src, "Tilt Absolute", p.tilt);
-    sendUVCCommand(src, "Zoom Absolute", p.zoom);
-    sendUVCCommand(src, "Focus Auto", p.focusAuto);
-    if (!p.focusAuto) sendUVCCommand(src, "Focus Absolute", p.focus);
-    sendUVCCommand(src, "White Balance Temperature Auto", p.whitebalAuto);
-    if (!p.whitebalAuto) sendUVCCommand(src, "White Balance Temperature", p.temperature);
-    obs_source_release(src);
+    OBSDataAutoRelease settings = obs_source_get_settings(src);
+    obs_data_set_int(settings, PTZ_PAN_ABSOLUTE, p.pan);
+    obs_data_set_int(settings, PTZ_TILT_ABSOLUTE, p.tilt);
+    obs_data_set_int(settings, PTZ_ZOOM_ABSOLUTE, p.zoom);
+    obs_data_set_bool(settings, PTZ_FOCUS_AUTO, p.focusAuto);
+    if (!p.focusAuto) obs_data_set_int(settings, PTZ_FOCUS_ABSOLUTE, p.focus);
+    obs_data_set_bool(settings, PTZ_WHITE_BALANCE_TEMP_AUTO, p.whitebalAuto);
+    if (!p.whitebalAuto) obs_data_set_int(settings, PTZ_WHITE_BALANCE_TEMP, p.temperature);
+    obs_source_update(src, settings);
 }
-
-/*
-void PTZOnvif::set_config(OBSData config)
-{
-	PTZDevice::set_config(config);
-	host = obs_data_get_string(config, "host");
-	port = (int)obs_data_get_int(config, "port");
-	username = obs_data_get_string(config, "username");
-	password = obs_data_get_string(config, "password");
-	if (username == "")
-		username = "admin";
-	if (!port)
-		port = 8899;
-	connectCamera();
-}
-
-OBSData PTZOnvif::get_config()
-{
-	OBSData config = PTZDevice::get_config();
-	obs_data_set_string(config, "host", QT_TO_UTF8(host));
-	obs_data_set_int(config, "port", port);
-	obs_data_set_string(config, "username", QT_TO_UTF8(username));
-	obs_data_set_string(config, "password", QT_TO_UTF8(password));
-	return config;
-}
-
-obs_properties_t *PTZOnvif::get_obs_properties()
-{
-	obs_properties_t *ptz_props = PTZDevice::get_obs_properties();
-	obs_property_t *p = obs_properties_get(ptz_props, "interface");
-	obs_properties_t *config = obs_property_group_content(p);
-	obs_property_set_description(p, "Onvif Connection");
-	obs_properties_add_text(config, "host", "IP Host", OBS_TEXT_DEFAULT);
-	obs_properties_add_int(config, "port", "TCP port", 1, 65535, 1);
-	obs_properties_add_text(config, "username", "Username",
-				OBS_TEXT_DEFAULT);
-	obs_properties_add_text(config, "password", "Password",
-				OBS_TEXT_DEFAULT);
-	return ptz_props;
-}
-*/
 
 void PTZUSBCam::log_source_settings() {
     obs_source_t *src =	obs_get_source_by_name(QT_TO_UTF8(objectName()));

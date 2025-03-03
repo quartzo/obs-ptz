@@ -26,8 +26,6 @@ class PTZUSBCam : public PTZDevice {
 private:
     QString m_PTZAddress{""};
     QMap<int, PtzUsbCamPreset> presets;
-    void sendUVCCommand(OBSSourceAutoRelease src, const char* control, int value);
-    void sendUVCCommand(OBSSourceAutoRelease src, const char* control, bool value);
 
 protected:
 
