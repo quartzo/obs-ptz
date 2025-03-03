@@ -10,6 +10,7 @@
 #include "ptz-visca-udp.hpp"
 #include "ptz-visca-tcp.hpp"
 #include "ptz-onvif.hpp"
+#include "ptz-usb-cam.hpp"
 #include "ptz.h"
 
 #if defined(ENABLE_SERIALPORT)
@@ -184,6 +185,8 @@ PTZDevice *PTZListModel::make_device(OBSData config)
 		ptz = new PTZViscaOverTCP(config);
 	if (type == "onvif")
 		ptz = new PTZOnvif(config);
+	if (type == "usb-cam")
+		ptz = new PTZUSBCam(config);
 	return ptz;
 }
 
