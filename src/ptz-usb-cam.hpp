@@ -31,6 +31,7 @@ protected:
 
 public:
 	PTZUSBCam(OBSData config);
+	void save(obs_data_t* settings) const;
 	virtual QString description();
 
 	void set_config(OBSData ptz_data);
