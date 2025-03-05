@@ -6,14 +6,30 @@
 	*/
 
 #include "imported/qt-wrappers.hpp"
+#include "ptz-device.hpp"
+#include <obs-data.h>
 #include <obs-properties.h>
 #include <obs.h>
 #include <obs.hpp>
 #include "ptz-usb-cam.hpp"
 
+void PTZUSBCam::ptz_tick_callback(void *param, float seconds) {
+    PTZUSBCam *cam = static_cast<PTZUSBCam *>(param);
+    cam->ptz_tick(seconds);
+}
+
 PTZUSBCam::PTZUSBCam(OBSData config) : PTZDevice(config)
 {
 	set_config(config);
+	pantilt_abs(0, 0);
+	zoom_abs(0);
+	set_autofocus(true);
+	obs_add_tick_callback(ptz_tick_callback, this);
+}
+
+PTZUSBCam::~PTZUSBCam()
+{
+	obs_remove_tick_callback(ptz_tick_callback, this);
 }
 
 QString PTZUSBCam::description()
@@ -29,14 +45,14 @@ void PTZUSBCam::set_config(OBSData config)
     for (size_t i = 0; i < count; ++i) {
         OBSDataAutoRelease preset = obs_data_array_item(presetArray, i);
         int id = static_cast<int>(obs_data_get_int(preset, "preset_id"));
-        PtzUsbCamPreset p = PtzUsbCamPreset();
-        p.pan = static_cast<int>(obs_data_get_int(preset, "pan"));
-        p.tilt = static_cast<int>(obs_data_get_int(preset, "tilt"));
-        p.zoom = static_cast<int>(obs_data_get_int(preset, "zoom"));
+        PtzUsbCamPos p = PtzUsbCamPos();
+        p.pan = obs_data_get_double(preset, "pan");
+        p.tilt = obs_data_get_double(preset, "tilt");
+        p.zoom = obs_data_get_double(preset, "zoom");
         p.focusAuto = obs_data_get_bool(preset, "focusauto");
-        p.focus = static_cast<int>(obs_data_get_int(preset, "focus"));
-        p.whitebalAuto = obs_data_get_bool(preset, "whitebalauto");
-        p.temperature = static_cast<int>(obs_data_get_int(preset, "temperature"));
+        p.focus = obs_data_get_double(preset, "focus");
+        // p.whitebalAuto = obs_data_get_bool(preset, "whitebalauto");
+        // p.temperature = obs_data_get_double(preset, "temperature");
         presets[id] = p;
     }
 }
@@ -46,17 +62,17 @@ OBSData PTZUSBCam::get_config()
 	OBSData config = PTZDevice::get_config();
 	OBSDataArrayAutoRelease presetArray = obs_data_array_create();
 	for (auto it = presets.constBegin(); it != presets.constEnd(); ++it) {
-		const PtzUsbCamPreset &preset = it.value();
+		const PtzUsbCamPos &preset = it.value();
 		OBSDataAutoRelease presetData = obs_data_create();
-		obs_data_set_int(presetData, "preset_id", it.key());
-		obs_data_set_int(presetData, "pan", preset.pan);
-		obs_data_set_int(presetData, "tilt", preset.tilt);
-		obs_data_set_int(presetData, "zoom", preset.zoom);
+		obs_data_set_double(presetData, "preset_id", it.key());
+		obs_data_set_double(presetData, "pan", preset.pan);
+		obs_data_set_double(presetData, "tilt", preset.tilt);
+		obs_data_set_double(presetData, "zoom", preset.zoom);
 		obs_data_set_bool(presetData, "focusauto", preset.focusAuto);
-		obs_data_set_int(presetData, "focus", preset.focus);
-		obs_data_set_bool(presetData, "whitebalauto",
-				  preset.whitebalAuto);
-		obs_data_set_int(presetData, "temperature", preset.temperature);
+		obs_data_set_double(presetData, "focus", preset.focus);
+		// obs_data_set_bool(presetData, "whitebalauto",
+		// 		  preset.whitebalAuto);
+		// obs_data_set_double(presetData, "temperature", preset.temperature);
 		obs_data_array_push_back(presetArray, presetData);
     }
     obs_data_set_array(config, "presets_memory", presetArray);
@@ -81,49 +97,34 @@ obs_properties_t *PTZUSBCam::get_obs_properties()
 
 void PTZUSBCam::do_update()
 {
-    /*
-	if (status &
-	    (STATUS_PANTILT_SPEED_CHANGED | STATUS_ZOOM_SPEED_CHANGED)) {
-		status &= ~(STATUS_PANTILT_SPEED_CHANGED |
-			    STATUS_ZOOM_SPEED_CHANGED);
-		OnvifPTZService c;
-		if (pan_speed == 0.0 && tilt_speed == 0.0 &&
-		    focus_speed == 0.0) {
-			QThread::msleep(200);
-			c.Stop(m_PTZAddress, username, password,
-			       m_selectedMedia.token);
-		} else {
-			c.ContinuousMove(m_PTZAddress, username, password,
-					 m_selectedMedia.token, pan_speed,
-					 tilt_speed, focus_speed);
-		}
-	}
-	*/
+    status &= ~(STATUS_PANTILT_SPEED_CHANGED |
+			    STATUS_ZOOM_SPEED_CHANGED | STATUS_FOCUS_SPEED_CHANGED);
+}
+
+void PTZUSBCam::ptz_tick(float seconds) {
+    tick_elapsed += seconds;
+    if (tick_elapsed < 0.05f) // Atualiza a cada 50 ms
+        return;
+    if (pan_speed != 0.0 || tilt_speed != 0.0) {
+        pantilt_rel(pan_speed*tick_elapsed, tilt_speed*tick_elapsed);
+    }
+    if (zoom_speed != 0.0) {
+        zoom_abs(now_pos.zoom + zoom_speed*tick_elapsed);
+    }
+    if (focus_speed != 0.0) {
+        focus_abs(now_pos.focus + focus_speed*tick_elapsed);
+    }
+    tick_elapsed = 0.0f; // Reseta após a atualização
 }
 
 // Autorelease object definitions
 inline void ___properties_dummy_addref(obs_properties_t *) {}
 using OBSPropertiesAutoDestroy = OBSRef<obs_properties_t *, ___properties_dummy_addref, obs_properties_destroy>;
 
-void clamp_set_field(obs_properties_t *props, obs_data_t *settings, const char* field_name,
-            double value, bool absolute) {
-    obs_property_t* prop = obs_properties_get(props, field_name);
-    if (!prop || obs_property_get_type(prop) != OBS_PROPERTY_INT)
-        return;
-    int min = obs_property_int_min(prop);
-    int max = obs_property_int_max(prop);
-    int clamped_value = std::clamp(value, -1.0, 1.0) * max;
-    if (!absolute) {
-        int current_value = obs_data_get_int(settings, field_name);
-        clamped_value += current_value;
-    }
-    int valuei = std::clamp(clamped_value, min, max);
-    printf("Field: %s, Value: %i\n", field_name, valuei);
-    obs_data_set_int(settings, field_name, valuei);
-}
-
-void PTZUSBCam::pantilt_abs(double pan, double tilt) {
-    printf("Abs Pan: %f, Tilt: %f\n", pan, tilt);
+void PTZUSBCam::pantilt_abs(double pan, double tilt)
+{
+    now_pos.pan = std::clamp(pan, -1.0, 1.0);
+    now_pos.tilt = std::clamp(tilt, -1.0, 1.0);
 
     OBSSourceAutoRelease src = obs_get_source_by_name(QT_TO_UTF8(objectName()));
     if (!src)
@@ -133,32 +134,41 @@ void PTZUSBCam::pantilt_abs(double pan, double tilt) {
         return;
     OBSDataAutoRelease settings = obs_source_get_settings(src);
 
-    clamp_set_field(props, settings, PTZ_PAN_ABSOLUTE, pan, true);
-    clamp_set_field(props, settings, PTZ_TILT_ABSOLUTE, tilt, true);
+    obs_property_t *pan_prop = obs_properties_get(props, PTZ_PAN_ABSOLUTE);
+    if (!pan_prop || obs_property_get_type(pan_prop) != OBS_PROPERTY_INT)
+        return;
+    int min = obs_property_int_min(pan_prop);
+    int max = obs_property_int_max(pan_prop);
+    int i_pan = std::clamp(static_cast<int>(now_pos.pan * max), min, max);
+    obs_data_set_int(settings, PTZ_PAN_ABSOLUTE, i_pan);
+    obs_property_modified(pan_prop, settings);
+
+    obs_property_t *tilt_prop = obs_properties_get(props, PTZ_TILT_ABSOLUTE);
+    if (!tilt_prop || obs_property_get_type(tilt_prop) != OBS_PROPERTY_INT)
+        return;
+    min = obs_property_int_min(tilt_prop);
+    max = obs_property_int_max(tilt_prop);
+    int i_tilt = std::clamp(static_cast<int>(now_pos.tilt * max), min, max);
+    obs_data_set_int(settings, PTZ_TILT_ABSOLUTE, i_tilt);
+    obs_property_modified(tilt_prop, settings);
 
     obs_source_update(src, settings);
 }
 
 void PTZUSBCam::pantilt_rel(double pan, double tilt)
 {
-    printf("Rel Pan: %f, Tilt: %f\n", pan, tilt);
-
-    OBSSourceAutoRelease src = obs_get_source_by_name(QT_TO_UTF8(objectName()));
-    if (!src)
-        return;
-    OBSPropertiesAutoDestroy props = obs_source_properties(src);
-    if (!props)
-        return;
-    OBSDataAutoRelease settings = obs_source_get_settings(src);
-
-    clamp_set_field(props, settings, PTZ_PAN_ABSOLUTE, pan, false);
-    clamp_set_field(props, settings, PTZ_TILT_ABSOLUTE, tilt, false);
-
-    obs_source_update(src, settings);
+    pantilt_abs(now_pos.pan+pan, now_pos.tilt+tilt);
 }
 
 void PTZUSBCam::pantilt_home()
 {
+    pantilt_abs(0, 0);
+}
+
+void PTZUSBCam::zoom_abs(double pos)
+{
+    now_pos.zoom = std::clamp(pos, 0.0, 1.0);
+
     OBSSourceAutoRelease src = obs_get_source_by_name(QT_TO_UTF8(objectName()));
     if (!src)
         return;
@@ -167,95 +177,86 @@ void PTZUSBCam::pantilt_home()
         return;
     OBSDataAutoRelease settings = obs_source_get_settings(src);
 
-    log_source_settings();
-
-    int pan = static_cast<int>(obs_data_get_int(settings, PTZ_PAN_ABSOLUTE));
-    int tilt = static_cast<int>(obs_data_get_int(settings, PTZ_TILT_ABSOLUTE));
-    printf("Current pan: %d, tilt: %d\n", pan, tilt);
-
-    obs_data_set_int(settings, PTZ_PAN_ABSOLUTE, 0);
-    obs_property_t *pan_prop = obs_properties_get(props, PTZ_PAN_ABSOLUTE);
-    obs_property_modified(pan_prop, settings);
-
-    obs_data_set_int(settings, PTZ_TILT_ABSOLUTE, 0);
-    obs_property_t *tilt_prop = obs_properties_get(props, PTZ_TILT_ABSOLUTE);
-    obs_property_modified(tilt_prop, settings);
+    obs_property_t *zoom_prop = obs_properties_get(props, PTZ_ZOOM_ABSOLUTE);
+    if (!zoom_prop || obs_property_get_type(zoom_prop) != OBS_PROPERTY_INT)
+        return;
+    int min = obs_property_int_min(zoom_prop);
+    int max = obs_property_int_max(zoom_prop);
+    int i_zoom = std::clamp(static_cast<int>(now_pos.zoom * max), min, max);
+    obs_data_set_int(settings, PTZ_ZOOM_ABSOLUTE, i_zoom);
+    obs_property_modified(zoom_prop, settings);
 
     obs_source_update(src, settings);
 }
 
-void PTZUSBCam::zoom_abs(double pos)
+void PTZUSBCam::focus_abs(double pos)
 {
-    /*
-	OnvifPTZService c;
-	c.AbsoluteMove(m_PTZAddress, username, password, m_selectedMedia.token,
-		       0.0, 0.0, pos);
-									*/
+    now_pos.focus = std::clamp(pos, 0.0, 1.0);
+
+    OBSSourceAutoRelease src = obs_get_source_by_name(QT_TO_UTF8(objectName()));
+    if (!src)
+        return;
+    OBSPropertiesAutoDestroy props = obs_source_properties(src);
+    if (!props)
+        return;
+    OBSDataAutoRelease settings = obs_source_get_settings(src);
+
+    obs_property_t *focus_prop = obs_properties_get(props, PTZ_FOCUS_ABSOLUTE);
+    if (!focus_prop || obs_property_get_type(focus_prop) != OBS_PROPERTY_INT)
+        return;
+    int min = obs_property_int_min(focus_prop);
+    int max = obs_property_int_max(focus_prop);
+    int i_focus = std::clamp(static_cast<int>(now_pos.focus * max), min, max);
+    obs_data_set_int(settings, PTZ_FOCUS_ABSOLUTE, i_focus);
+    obs_property_modified(focus_prop, settings);
+
+    obs_source_update(src, settings);
+}
+
+void PTZUSBCam::set_autofocus(bool enabled)
+{
+    now_pos.focusAuto = enabled;
+
+    OBSSourceAutoRelease src = obs_get_source_by_name(QT_TO_UTF8(objectName()));
+    if (!src)
+        return;
+    OBSPropertiesAutoDestroy props = obs_source_properties(src);
+    if (!props)
+        return;
+    OBSDataAutoRelease settings = obs_source_get_settings(src);
+
+    obs_property_t *focus_prop = obs_properties_get(props, PTZ_FOCUS_AUTO);
+    if (!focus_prop || obs_property_get_type(focus_prop) != OBS_PROPERTY_BOOL)
+        return;
+    obs_data_set_bool(settings, PTZ_FOCUS_AUTO, now_pos.focusAuto);
+    obs_property_modified(focus_prop, settings);
+
+    obs_source_update(src, settings);
 }
 
 void PTZUSBCam::memory_reset(int id)
 {
     if (!presets.contains(id))
         return;
-
     presets.remove(id);
 }
 
 void PTZUSBCam::memory_set(int i)
 {
-    printf("Chamada memory_set para i: %i\n", i);
-    OBSSourceAutoRelease src = obs_get_source_by_name(QT_TO_UTF8(objectName()));
-    if (!src)
-        return;
-
-    OBSDataAutoRelease settings = obs_source_get_settings(src);
-    PtzUsbCamPreset p;
-    p.pan = static_cast<int>(obs_data_get_int(settings, PTZ_PAN_ABSOLUTE));
-    p.tilt = static_cast<int>(obs_data_get_int(settings, PTZ_TILT_ABSOLUTE));
-    p.zoom = static_cast<int>(obs_data_get_int(settings, PTZ_ZOOM_ABSOLUTE));
-    p.focusAuto = obs_data_get_bool(settings, PTZ_FOCUS_AUTO);
-    p.focus = static_cast<int>(obs_data_get_int(settings, PTZ_FOCUS_ABSOLUTE));
-    p.whitebalAuto = obs_data_get_bool(settings, PTZ_WHITE_BALANCE_TEMP_AUTO);
-    p.temperature = static_cast<int>(obs_data_get_int(settings, PTZ_WHITE_BALANCE_TEMP));
-    presets[i] = p;
-
-    for (auto it = presets.constBegin(); it != presets.constEnd(); ++it) {
-        printf("Preset id %i:\n", it.key());
-        const PtzUsbCamPreset& p = it.value();
-        printf("  pan: %i\n", p.pan);
-        printf("  tilt: %i\n", p.tilt);
-        printf("  zoom: %i\n", p.zoom);
-        printf("  focusAuto: %i\n", p.focusAuto);
-        printf("  focus: %i\n", p.focus);
-        printf("  whitebalAuto: %i\n", p.whitebalAuto);
-        printf("  temperature: %i\n", p.temperature);
-    }
-    /*
-    OBSDataAutoRelease plugin_settings = obs_source_get_settings(pluginSource);
-    save(plugin_settings);
-    obs_source_update(pluginSource, plugin_settings);
-    */
+    presets[i] = now_pos;
 }
 
 void PTZUSBCam::memory_recall(int id)
 {
     if (!presets.contains(id))
         return;
-    const PtzUsbCamPreset& p = presets[id];
 
-    OBSSourceAutoRelease src = obs_get_source_by_name(QT_TO_UTF8(objectName()));
-    if (!src)
-        return;
-
-    OBSDataAutoRelease settings = obs_source_get_settings(src);
-    obs_data_set_int(settings, PTZ_PAN_ABSOLUTE, p.pan);
-    obs_data_set_int(settings, PTZ_TILT_ABSOLUTE, p.tilt);
-    obs_data_set_int(settings, PTZ_ZOOM_ABSOLUTE, p.zoom);
-    obs_data_set_bool(settings, PTZ_FOCUS_AUTO, p.focusAuto);
-    if (!p.focusAuto) obs_data_set_int(settings, PTZ_FOCUS_ABSOLUTE, p.focus);
-    obs_data_set_bool(settings, PTZ_WHITE_BALANCE_TEMP_AUTO, p.whitebalAuto);
-    if (!p.whitebalAuto) obs_data_set_int(settings, PTZ_WHITE_BALANCE_TEMP, p.temperature);
-    obs_source_update(src, settings);
+    now_pos = presets[id];
+    pantilt_abs(now_pos.pan, now_pos.tilt);
+    zoom_abs(now_pos.zoom);
+    set_autofocus(now_pos.focusAuto);
+    if (!now_pos.focusAuto)
+        focus_abs(now_pos.focus);
 }
 
 void PTZUSBCam::log_source_settings() {

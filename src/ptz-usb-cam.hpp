@@ -8,16 +8,17 @@
 
 #include <QObject>
 #include <QTcpSocket>
+#include "protocol-helpers.hpp"
 #include "ptz-device.hpp"
 
-struct PtzUsbCamPreset {
-        int pan = 0;
-        int tilt = 0;
-        int zoom = 0;
+struct PtzUsbCamPos {
+        double pan = 0;
+        double tilt = 0;
+        double zoom = 0;
         bool focusAuto = true;
-        int focus = 0;
-        bool whitebalAuto = true;
-        int temperature = 0;
+        double focus = 0;
+        // bool whitebalAuto = true;
+        //double temperature = 0;
     };
 
 class PTZUSBCam : public PTZDevice {
@@ -25,12 +26,17 @@ class PTZUSBCam : public PTZDevice {
 
 private:
     QString m_PTZAddress{""};
-    QMap<int, PtzUsbCamPreset> presets;
+    PtzUsbCamPos now_pos;
+    QMap<int, PtzUsbCamPos> presets;
+    double tick_elapsed = 0.0f;
 
 protected:
+    static void ptz_tick_callback(void *param, float seconds);
+    void ptz_tick(float seconds);
 
 public:
 	PTZUSBCam(OBSData config);
+	~PTZUSBCam();
 	void save(obs_data_t* settings) const;
 	virtual QString description();
 
@@ -43,6 +49,8 @@ public:
 	void pantilt_abs(double pan, double tilt);
 	void pantilt_home();
 	void zoom_abs(double pos);
+	void focus_abs(double pos);
+	void set_autofocus(bool enabled);
 	void memory_reset(int i);
 	void memory_set(int i);
 	void memory_recall(int i);
