@@ -11,6 +11,27 @@
 #include "protocol-helpers.hpp"
 #include "ptz-device.hpp"
 
+#ifdef _WIN32
+#include <dshow.h>
+
+class DirectShowCache {
+private:
+    std::string device_id_;
+    IBaseFilter *filter_;
+    IAMCameraControl *cam_control_;
+    IAMCameraControl *getCamControl(const std::string &device_name);
+public:
+    DirectShowCache();
+    ~DirectShowCache();
+
+    void setPan(const std::string &device_name, double value);
+    void setTilt(const std::string &device_name, double value);
+    void setZoom(const std::string &device_name, double value);
+    void setAutoFocus(const std::string &device_name);
+    void setFocus(const std::string &device_name, double value);
+};
+#endif
+
 struct PtzUsbCamPos {
         double pan = 0;
         double tilt = 0;
@@ -29,7 +50,9 @@ private:
     PtzUsbCamPos now_pos;
     QMap<int, PtzUsbCamPos> presets;
     double tick_elapsed = 0.0f;
-
+    #ifdef _WIN32
+        DirectShowCache ds_cache_;
+    #endif
 protected:
     static void ptz_tick_callback(void *param, float seconds);
     void ptz_tick(float seconds);
