@@ -14,10 +14,6 @@
 #include <obs.hpp>
 #include "ptz-usb-cam.hpp"
 
-enum PTZAxis {
-    PTZ_PAN = 0, PTZ_TILT = 1, PTZ_ZOOM = 2, PTZ_FOCUS = 3
-};
-
 #ifdef __linux__
 #include <linux/v4l2-controls.h>
 #include <linux/videodev2.h>
@@ -25,122 +21,73 @@ enum PTZAxis {
 #include <fcntl.h>
 #include <unistd.h>
 
-const std::array<unsigned int, 4> axis_ids = {
+const std::array<unsigned int, 5> axis_ids = {
     V4L2_CID_PAN_ABSOLUTE, V4L2_CID_TILT_ABSOLUTE,
-    V4L2_CID_ZOOM_ABSOLUTE, V4L2_CID_FOCUS_ABSOLUTE
+    V4L2_CID_ZOOM_ABSOLUTE, V4L2_CID_FOCUS_ABSOLUTE,
+    V4L2_CID_FOCUS_AUTO
 };
 
 class V4L2Control : public PTZControl {
 private:
     int fd;
-    std::string device_path;
-
-    struct v4l2_queryctrl queryctrl;
-    std::array<long, 4> min, max;
-    struct v4l2_control control;
+    int query_ctrl(unsigned int i, long *pmin, long *pmax) {
+        if (fd == -1) return false;
+        struct v4l2_queryctrl queryctrl;
+        memset(&queryctrl, 0, sizeof(queryctrl));
+        queryctrl.id = axis_ids[i];
+        if (ioctl(fd, VIDIOC_QUERYCTRL, &queryctrl) == -1) {
+            blog(LOG_ERROR, "VIDIOC_QUERYCTRL failed for axis %d", i);
+            return -1;
+        }
+        *pmin = queryctrl.minimum;
+        *pmax = queryctrl.maximum;
+        return 0;
+    }
+    int set_ctrl(unsigned int i, long value) {
+        if (fd == -1) return false;
+        struct v4l2_control control;
+        memset(&control, 0, sizeof(control));
+        control.id = axis_ids[i];
+        control.value = value;
+        if (ioctl(fd, VIDIOC_S_CTRL, &control) == -1) {
+            blog(LOG_ERROR, "Failed to set PTZ %d value", i);
+            return false;
+        }
+        return true;
+    }
 
 public:
-    V4L2Control(const std::string& device) : device_path(device) {
+    V4L2Control(const std::string& device) {
+        device_path = device;
         fd = open(device_path.c_str(), O_RDWR);
         if (fd == -1) {
             blog(LOG_ERROR, "Failed to open V4L2 device: %s", device_path.c_str());
             return;
         }
-
-        for (size_t i = 0; i < axis_ids.size(); i++) {
-            memset(&queryctrl, 0, sizeof(queryctrl));
-            queryctrl.id = axis_ids[i];
-            if (ioctl(fd, VIDIOC_QUERYCTRL, &queryctrl) == -1) {
-                blog(LOG_ERROR, "VIDIOC_QUERYCTRL failed for axis %ld", i);
-                continue;
-            }
-            min[i] = queryctrl.minimum;
-            max[i] = queryctrl.maximum;
-        }
+        query_ctrl(PTZ_PAN, &min[PTZ_PAN], &max[PTZ_PAN]);
+        query_ctrl(PTZ_TILT, &min[PTZ_TILT], &max[PTZ_TILT]);
+        query_ctrl(PTZ_ZOOM, &min[PTZ_ZOOM], &max[PTZ_ZOOM]);
+        query_ctrl(PTZ_FOCUS, &min[PTZ_FOCUS], &max[PTZ_FOCUS]);
     }
-    bool pan(double value) override {
-        if (fd == -1) return false;
-        value = std::clamp(value, -1.0, 1.0);
-        long mapped_value = static_cast<long>(value * max[PTZ_PAN]);
-        mapped_value = std::clamp(mapped_value, min[PTZ_PAN], max[PTZ_PAN]);
-
-        memset(&control, 0, sizeof(control));
-        control.id = V4L2_CID_PAN_ABSOLUTE;
-        control.value = mapped_value;
-
-        if (ioctl(fd, VIDIOC_S_CTRL, &control) == -1) {
-            blog(LOG_ERROR, "Failed to set PTZ Pan value");
-            return false;
-        }
-        return true;
+    bool internal_pan(long value) override {
+        return set_ctrl(PTZ_PAN, value);
     }
-    bool tilt(double value) override {
-        if (fd == -1) return false;
-        value = std::clamp(value, -1.0, 1.0);
-        long mapped_value = static_cast<long>(value * max[PTZ_TILT]);
-        mapped_value = std::clamp(mapped_value, min[PTZ_TILT], max[PTZ_TILT]);
-
-        memset(&control, 0, sizeof(control));
-        control.id = V4L2_CID_TILT_ABSOLUTE;
-        control.value = mapped_value;
-
-        if (ioctl(fd, VIDIOC_S_CTRL, &control) == -1) {
-            blog(LOG_ERROR, "Failed to set PTZ Tilt value");
-            return false;
-        }
-        return true;
+    bool internal_tilt(long value) override {
+        return set_ctrl(PTZ_TILT, value);
     }
-    bool zoom(double value) override {
-        if (fd == -1) return false;
-        value = std::clamp(value, 0.0, 1.0);
-        long mapped_value = static_cast<long>(value * max[PTZ_ZOOM]);
-        mapped_value = std::clamp(mapped_value, min[PTZ_ZOOM], max[PTZ_ZOOM]);
-
-        memset(&control, 0, sizeof(control));
-        control.id = V4L2_CID_ZOOM_ABSOLUTE;
-        control.value = mapped_value;
-
-        if (ioctl(fd, VIDIOC_S_CTRL, &control) == -1) {
-            blog(LOG_ERROR, "Failed to set PTZ Zoom value");
-            return false;
-        }
-        return true;
+    bool internal_zoom(long value) override {
+        return set_ctrl(PTZ_ZOOM, value);
     }
-    bool focus(double value) override {
-        if (fd == -1) return false;
-        value = std::clamp(value, 0.0, 1.0);
-        long mapped_value = static_cast<long>(value * max[PTZ_FOCUS]);
-        mapped_value = std::clamp(mapped_value, min[PTZ_FOCUS], max[PTZ_FOCUS]);
-
-        memset(&control, 0, sizeof(control));
-        control.id = V4L2_CID_FOCUS_ABSOLUTE;
-        control.value = mapped_value;
-
-        if (ioctl(fd, VIDIOC_S_CTRL, &control) == -1) {
-            blog(LOG_ERROR, "Failed to set PTZ Focus value");
-            return false;
-        }
-        return true;
+    bool internal_focus(long value) override {
+        return set_ctrl(PTZ_FOCUS, value);
     }
     bool setAutoFocus(bool enabled) override {
         if (fd == -1) return false;
-        memset(&control, 0, sizeof(control));
-        control.id = V4L2_CID_FOCUS_AUTO;
-        control.value = enabled ? 1 : 0;
-
-        if (ioctl(fd, VIDIOC_S_CTRL, &control) == -1) {
-            blog(LOG_ERROR, "Failed to set autofocus");
-            return false;
-        }
-        return true;
+        return set_ctrl(PTZ_FOCUS_AUTO, enabled ? 1 : 0);
     }
     ~V4L2Control() override {
-        if (fd != -1) {
-            close(fd);
-        }
-    }
-    std::string getDevicePath() const override {
-        return device_path;
+        if (fd == -1) return;
+        close(fd);
     }
     bool isValid() const override {
         return fd != -1;
@@ -157,11 +104,11 @@ private:
     IBaseFilter *filter_;
     IAMCameraControl *cam_control_;
     std::string device_path;
-    std::array<long, 4> min, max;
     long last_focus = 0;
 
 public:
-    DirectShowControl(const std::string& device) : device_path(device) {
+    DirectShowControl(const std::string& device) {
+        device_path = device;
         QString decoded_path = QString::fromStdString(device_path);
         int colon_pos = decoded_path.indexOf(':');
         if (colon_pos != -1) {
@@ -256,54 +203,39 @@ public:
             return;
         }
     }
-    bool pan(double value) override {
+    bool internal_pan(long value) override {
         if (!cam_control_) return false;
-        value = std::clamp(value, -1.0, 1.0);
-        long mapped_value = static_cast<long>(value * max[PTZAxis::PTZ_PAN]);
-        mapped_value = std::clamp(mapped_value, min[PTZAxis::PTZ_PAN], max[PTZAxis::PTZ_PAN]);
-
-        HRESULT hr = cam_control_->Set(CameraControl_Pan, mapped_value, CameraControl_Flags_Manual);
+        HRESULT hr = cam_control_->Set(CameraControl_Pan, value, CameraControl_Flags_Manual);
         if (FAILED(hr)) {
-            blog(LOG_ERROR, "Failed to set Pan: %ld (mapped value: %ld)", hr, mapped_value);
+            blog(LOG_ERROR, "Failed to set Pan: %ld (mapped value: %ld)", hr, value);
             return false;
         }
         return true;
     }
-    bool tilt(double value) override {
+    bool internal_tilt(long value) override {
         if (!cam_control_) return false;
-        value = std::clamp(value, -1.0, 1.0);
-        long mapped_value = static_cast<long>(value * max[PTZAxis::PTZ_TILT]);
-        mapped_value = std::clamp(mapped_value, min[PTZAxis::PTZ_TILT], max[PTZAxis::PTZ_TILT]);
-
-        HRESULT hr = cam_control_->Set(CameraControl_Tilt, mapped_value, CameraControl_Flags_Manual);
+        HRESULT hr = cam_control_->Set(CameraControl_Tilt, value, CameraControl_Flags_Manual);
         if (FAILED(hr)) {
-            blog(LOG_ERROR, "Failed to set Tilt: %ld (mapped value: %ld)", hr, mapped_value);
+            blog(LOG_ERROR, "Failed to set Tilt: %ld (mapped value: %ld)", hr, value);
             return false;
         }
         return true;
     }
-    bool zoom(double value) override {
+    bool internal_zoom(long value) override {
         if (!cam_control_) return false;
-        value = std::clamp(value, 0.0, 1.0);
-        long mapped_value = static_cast<long>(value * max[PTZAxis::PTZ_ZOOM]);
-        mapped_value = std::clamp(mapped_value, min[PTZAxis::PTZ_ZOOM], max[PTZAxis::PTZ_ZOOM]);
-
-        HRESULT hr = cam_control_->Set(CameraControl_Zoom, mapped_value, CameraControl_Flags_Manual);
+        HRESULT hr = cam_control_->Set(CameraControl_Zoom, value, CameraControl_Flags_Manual);
         if (FAILED(hr)) {
-            blog(LOG_ERROR, "Failed to set Zoom: %ld (mapped value: %ld)", hr, mapped_value);
+            blog(LOG_ERROR, "Failed to set Zoom: %ld (mapped value: %ld)", hr, value);
             return false;
         }
         return true;
     }
-    bool focus(double value) override {
+    bool internal_focus(long value) override {
         if (!cam_control_) return false;
-        value = std::clamp(value, 0.0, 1.0);
-        long mapped_value = static_cast<long>(value * max[PTZAxis::PTZ_FOCUS]);
-        mapped_value = std::clamp(mapped_value, min[PTZAxis::PTZ_FOCUS], max[PTZAxis::PTZ_FOCUS]);
-
-        HRESULT hr = cam_control_->Set(CameraControl_Focus, mapped_value, CameraControl_Flags_Manual);
+        last_focus = value;
+        HRESULT hr = cam_control_->Set(CameraControl_Focus, value, CameraControl_Flags_Manual);
         if (FAILED(hr)) {
-            blog(LOG_ERROR, "Failed to set Focus: %ld (mapped value: %ld)", hr, mapped_value);
+            blog(LOG_ERROR, "Failed to set Focus: %ld (mapped value: %ld)", hr, value);
             return false;
         }
         return true;
@@ -330,14 +262,10 @@ public:
             filter_->Release();
         }
     }
-    std::string getDevicePath() const override {
-        return device_path;
-    }
     bool isValid() const override {
         return cam_control_ != nullptr;
     }
 };
-
 #endif
 
 void PTZUSBCam::ptz_tick_callback(void *param, float seconds) {
@@ -438,21 +366,19 @@ void PTZUSBCam::ptz_tick(float seconds) {
 void PTZUSBCam::initialize_and_check_ptz_control()
 {
     std::string video_device_id = "";
-    obs_source_t *src = obs_get_source_by_name(QT_TO_UTF8(objectName()));
+    OBSSourceAutoRelease src = obs_get_source_by_name(QT_TO_UTF8(objectName()));
     if (src) {
-        obs_data_t *psettings = obs_source_get_settings(src);
+        OBSDataAutoRelease psettings = obs_source_get_settings(src);
         if (psettings) {
 #ifdef _WIN32
             video_device_id = obs_data_get_string(psettings, "video_device_id");
-#endif
-#ifdef __linux__
+#else
             video_device_id = obs_data_get_string(psettings, "device_id");
 #endif
-            obs_data_release(psettings);
         }
-        obs_source_release(src);
     }
 
+    // already have the device, and it didn't change: nothing to do
     if(ptz_control_ != NULL && ptz_control_->isValid() &&
        ptz_control_->getDevicePath() == video_device_id) {
         return;
