@@ -1,217 +1,342 @@
-/* Pan Tilt Zoom VISCA over TCP implementation
+/* Pan Tilt Zoom USB UVC implementation
 	*
-	* Copyright 2021 Grant Likely <grant.likely@secretlab.ca>
+	* Copyright 2025 Fabio Ferrari <fabio.ferrar@gmail.com>
 	*
 	* SPDX-License-Identifier: GPLv2
 	*/
 
 #include "imported/qt-wrappers.hpp"
 #include "ptz-device.hpp"
+#include <cstddef>
 #include <obs-data.h>
 #include <obs-properties.h>
 #include <obs.h>
 #include <obs.hpp>
 #include "ptz-usb-cam.hpp"
 
+enum PTZAxis {
+    PTZ_PAN = 0, PTZ_TILT = 1, PTZ_ZOOM = 2, PTZ_FOCUS = 3
+};
+
+#ifdef __linux__
+#include <linux/v4l2-controls.h>
+#include <linux/videodev2.h>
+#include <sys/ioctl.h>
+#include <fcntl.h>
+#include <unistd.h>
+
+const std::array<unsigned int, 4> axis_ids = {
+    V4L2_CID_PAN_ABSOLUTE, V4L2_CID_TILT_ABSOLUTE,
+    V4L2_CID_ZOOM_ABSOLUTE, V4L2_CID_FOCUS_ABSOLUTE
+};
+
+class V4L2Control : public PTZControl {
+private:
+    int fd;
+    std::string device_path;
+
+    struct v4l2_queryctrl queryctrl;
+    std::array<long, 4> min, max;
+    struct v4l2_control control;
+
+public:
+    V4L2Control(const std::string& device) : device_path(device) {
+        fd = open(device_path.c_str(), O_RDWR);
+        if (fd == -1) {
+            blog(LOG_ERROR, "Failed to open V4L2 device: %s", device_path.c_str());
+            return;
+        }
+
+        for (size_t i = 0; i < axis_ids.size(); i++) {
+            memset(&queryctrl, 0, sizeof(queryctrl));
+            queryctrl.id = axis_ids[i];
+            if (ioctl(fd, VIDIOC_QUERYCTRL, &queryctrl) == -1) {
+                blog(LOG_ERROR, "VIDIOC_QUERYCTRL failed for axis %ld", i);
+                continue;
+            }
+            min[i] = queryctrl.minimum;
+            max[i] = queryctrl.maximum;
+        }
+    }
+    bool pan(double value) override {
+        if (fd == -1) return false;
+        value = std::clamp(value, -1.0, 1.0);
+        long mapped_value = static_cast<long>(value * max[PTZ_PAN]);
+        mapped_value = std::clamp(mapped_value, min[PTZ_PAN], max[PTZ_PAN]);
+
+        memset(&control, 0, sizeof(control));
+        control.id = V4L2_CID_PAN_ABSOLUTE;
+        control.value = mapped_value;
+
+        if (ioctl(fd, VIDIOC_S_CTRL, &control) == -1) {
+            blog(LOG_ERROR, "Failed to set PTZ Pan value");
+            return false;
+        }
+        return true;
+    }
+    bool tilt(double value) override {
+        if (fd == -1) return false;
+        value = std::clamp(value, -1.0, 1.0);
+        long mapped_value = static_cast<long>(value * max[PTZ_TILT]);
+        mapped_value = std::clamp(mapped_value, min[PTZ_TILT], max[PTZ_TILT]);
+
+        memset(&control, 0, sizeof(control));
+        control.id = V4L2_CID_TILT_ABSOLUTE;
+        control.value = mapped_value;
+
+        if (ioctl(fd, VIDIOC_S_CTRL, &control) == -1) {
+            blog(LOG_ERROR, "Failed to set PTZ Tilt value");
+            return false;
+        }
+        return true;
+    }
+    bool zoom(double value) override {
+        if (fd == -1) return false;
+        value = std::clamp(value, 0.0, 1.0);
+        long mapped_value = static_cast<long>(value * max[PTZ_ZOOM]);
+        mapped_value = std::clamp(mapped_value, min[PTZ_ZOOM], max[PTZ_ZOOM]);
+
+        memset(&control, 0, sizeof(control));
+        control.id = V4L2_CID_ZOOM_ABSOLUTE;
+        control.value = mapped_value;
+
+        if (ioctl(fd, VIDIOC_S_CTRL, &control) == -1) {
+            blog(LOG_ERROR, "Failed to set PTZ Zoom value");
+            return false;
+        }
+        return true;
+    }
+    bool focus(double value) override {
+        if (fd == -1) return false;
+        value = std::clamp(value, 0.0, 1.0);
+        long mapped_value = static_cast<long>(value * max[PTZ_FOCUS]);
+        mapped_value = std::clamp(mapped_value, min[PTZ_FOCUS], max[PTZ_FOCUS]);
+
+        memset(&control, 0, sizeof(control));
+        control.id = V4L2_CID_FOCUS_ABSOLUTE;
+        control.value = mapped_value;
+
+        if (ioctl(fd, VIDIOC_S_CTRL, &control) == -1) {
+            blog(LOG_ERROR, "Failed to set PTZ Focus value");
+            return false;
+        }
+        return true;
+    }
+    bool setAutoFocus(bool enabled) override {
+        if (fd == -1) return false;
+        memset(&control, 0, sizeof(control));
+        control.id = V4L2_CID_FOCUS_AUTO;
+        control.value = enabled ? 1 : 0;
+
+        if (ioctl(fd, VIDIOC_S_CTRL, &control) == -1) {
+            blog(LOG_ERROR, "Failed to set autofocus");
+            return false;
+        }
+        return true;
+    }
+    ~V4L2Control() override {
+        if (fd != -1) {
+            close(fd);
+        }
+    }
+    std::string getDevicePath() const override {
+        return device_path;
+    }
+    bool isValid() const override {
+        return fd != -1;
+    }
+};
+#endif
+
 #ifdef _WIN32
+#include <dshow.h>
 #pragma comment(lib, "strmiids.lib") // Linka com DirectShow no Windows
 
-DirectShowCache::DirectShowCache()
-    : filter_(nullptr), cam_control_(nullptr) {
-}
+class DirectShowControl : public PTZControl {
+private:
+    IBaseFilter *filter_;
+    IAMCameraControl *cam_control_;
+    std::string device_path;
+    std::array<long, 4> min, max;
+    long last_focus = 0;
 
-DirectShowCache::~DirectShowCache() {
-    if (cam_control_) cam_control_->Release();
-    if (filter_) filter_->Release();
-}
+public:
+    DirectShowControl(const std::string& device) : device_path(device) {
+        QString decoded_path = QString::fromStdString(device_path);
+        int colon_pos = decoded_path.indexOf(':');
+        if (colon_pos != -1) {
+            decoded_path = decoded_path.mid(colon_pos + 1);
+        }
+        decoded_path = decoded_path.split("#22").join("#");
+        decoded_path = decoded_path.split("#3A").join(":");
+        std::string decoded_std_path = decoded_path.toStdString();
+        // blog(LOG_INFO, "PTZ-USB-CAM Device: %s", decoded_std_path.c_str());
 
-IAMCameraControl *DirectShowCache::getCamControl(const std::string &device_name) {
-    if (cam_control_ && device_id_ == device_name) {
-        return cam_control_;
-    }
-
-    QString decoded_path = QString::fromStdString(device_name);
-    int colon_pos = decoded_path.indexOf(':');
-    if (colon_pos != -1) {
-        decoded_path = decoded_path.mid(colon_pos + 1);
-    }
-    decoded_path = decoded_path.split("#22").join("#");
-    decoded_path = decoded_path.split("#3A").join(":");
-    std::string decoded_std_path = decoded_path.toStdString();
-    // blog(LOG_INFO, "PTZ-USB-CAM Device: %s", decoded_std_path.c_str());
-
-    HRESULT hr = CoInitialize(nullptr);
-    if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) {
-        blog(LOG_ERROR, "Failed to initialize COM: %ld", hr);
-        return nullptr;
-    }
-
-    if (cam_control_) {
-        cam_control_->Release();
-        cam_control_ = nullptr;
-    }
-    if (filter_) {
-        filter_->Release();
-        filter_ = nullptr;
-    }
-
-    ICreateDevEnum *dev_enum = nullptr;
-    hr = CoCreateInstance(CLSID_SystemDeviceEnum, nullptr, CLSCTX_INPROC_SERVER,
-                         IID_ICreateDevEnum, (void **)&dev_enum);
-    if (FAILED(hr)) {
-        blog(LOG_ERROR, "Failed to create device enumerator: %ld", hr);
-        return nullptr;
-    }
-
-    IEnumMoniker *enum_moniker = nullptr;
-    hr = dev_enum->CreateClassEnumerator(CLSID_VideoInputDeviceCategory, &enum_moniker, 0);
-    if (FAILED(hr) || !enum_moniker) {
-        blog(LOG_ERROR, "Failed to enumerate video devices: %ld", hr);
-        dev_enum->Release();
-        return nullptr;
-    }
-
-    IMoniker *moniker = nullptr;
-    while (enum_moniker->Next(1, &moniker, nullptr) == S_OK) {
-        IPropertyBag *prop_bag = nullptr;
-        hr = moniker->BindToStorage(0, 0, IID_IPropertyBag, (void **)&prop_bag);
-        if (FAILED(hr)) {
-            moniker->Release();
-            continue;
+        HRESULT hr = CoInitialize(nullptr);
+        if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) {
+            blog(LOG_ERROR, "Failed to initialize COM: %ld", hr);
+            return;
         }
 
-        VARIANT var_name;
-        VariantInit(&var_name);
-        hr = prop_bag->Read(L"DevicePath", &var_name, 0);
-        if (SUCCEEDED(hr)) {
-            std::wstring w_device_path(var_name.bstrVal);
-            std::string device_path(w_device_path.begin(), w_device_path.end());
-            if (device_path == decoded_std_path) {
-                hr = moniker->BindToObject(0, 0, IID_IBaseFilter, (void **)&filter_);
-                if (SUCCEEDED(hr)) {
-                    hr = filter_->QueryInterface(IID_IAMCameraControl, (void **)&cam_control_);
-                    if (FAILED(hr)) {
-                        blog(LOG_ERROR, "Failed to get IAMCameraControl: %ld", hr);
-                        filter_->Release();
-                        filter_ = nullptr;
-                    } else {
-                        device_id_ = device_name;
-                        // blog(LOG_INFO, "Obtained DirectShow filter for device: %s", device_name.c_str());
+        ICreateDevEnum *dev_enum = nullptr;
+        hr = CoCreateInstance(CLSID_SystemDeviceEnum, nullptr, CLSCTX_INPROC_SERVER,
+                             IID_ICreateDevEnum, (void **)&dev_enum);
+        if (FAILED(hr)) {
+            blog(LOG_ERROR, "Failed to create device enumerator: %ld", hr);
+            return;
+        }
+
+        IEnumMoniker *enum_moniker = nullptr;
+        hr = dev_enum->CreateClassEnumerator(CLSID_VideoInputDeviceCategory, &enum_moniker, 0);
+        if (FAILED(hr) || !enum_moniker) {
+            blog(LOG_ERROR, "Failed to enumerate video devices: %ld", hr);
+            dev_enum->Release();
+            return;
+        }
+
+        IMoniker *moniker = nullptr;
+        while (enum_moniker->Next(1, &moniker, nullptr) == S_OK) {
+            IPropertyBag *prop_bag = nullptr;
+            hr = moniker->BindToStorage(0, 0, IID_IPropertyBag, (void **)&prop_bag);
+            if (FAILED(hr)) {
+                moniker->Release();
+                continue;
+            }
+
+            VARIANT var_name;
+            VariantInit(&var_name);
+            hr = prop_bag->Read(L"DevicePath", &var_name, 0);
+            if (SUCCEEDED(hr)) {
+                std::wstring w_device_path(var_name.bstrVal);
+                std::string device_path1(w_device_path.begin(), w_device_path.end());
+                if (device_path1 == decoded_std_path) {
+                    hr = moniker->BindToObject(0, 0, IID_IBaseFilter, (void **)&filter_);
+                    if (SUCCEEDED(hr)) {
+                        hr = filter_->QueryInterface(IID_IAMCameraControl, (void **)&cam_control_);
+                        if (FAILED(hr)) {
+                            blog(LOG_ERROR, "Failed to get IAMCameraControl: %ld", hr);
+                            filter_->Release();
+                            filter_ = nullptr;
+                        }
                     }
                 }
+                VariantClear(&var_name);
             }
-            VariantClear(&var_name);
+
+            prop_bag->Release();
+            moniker->Release();
+
+            if (cam_control_) break;
         }
 
-        prop_bag->Release();
-        moniker->Release();
+        enum_moniker->Release();
+        dev_enum->Release();
 
-        if (cam_control_) break;
+        if (cam_control_ == nullptr) {
+            return;
+        }
+        // blog(LOG_INFO, "Obtained DirectShow filter for device: %s", device_name.c_str());
+        long step, default_value, flags;
+        hr = cam_control_->GetRange(CameraControl_Pan, &min[PTZ_PAN], &max[PTZ_PAN],
+                                            &step, &default_value, &flags);
+        if (!FAILED(hr)) {
+            hr = cam_control_->GetRange(CameraControl_Tilt, &min[PTZ_TILT], &max[PTZ_TILT],
+                                        &step, &default_value, &flags);
+        }
+        if (!FAILED(hr)) {
+            hr = cam_control_->GetRange(CameraControl_Zoom, &min[PTZ_ZOOM], &max[PTZ_ZOOM],
+                                        &step, &default_value, &flags);
+        }
+        if (!FAILED(hr)) {
+            hr = cam_control_->GetRange(CameraControl_Focus, &min[PTZ_FOCUS], &max[PTZ_FOCUS],
+                                        &step, &default_value, &flags);
+        }
+        if (FAILED(hr)) {
+            blog(LOG_ERROR, "Failed to get ranges: %ld", hr);
+            return;
+        }
     }
+    bool pan(double value) override {
+        if (!cam_control_) return false;
+        value = std::clamp(value, -1.0, 1.0);
+        long mapped_value = static_cast<long>(value * max[PTZAxis::PTZ_PAN]);
+        mapped_value = std::clamp(mapped_value, min[PTZAxis::PTZ_PAN], max[PTZAxis::PTZ_PAN]);
 
-    enum_moniker->Release();
-    dev_enum->Release();
-
-    return cam_control_;
-}
-
-void DirectShowCache::setPan(const std::string &device_name, double value) {
-    IAMCameraControl *cam_control = getCamControl(device_name);
-    if (!cam_control) return;
-
-    long pan_min, pan_max, step, default_value, flags;
-    HRESULT hr = cam_control->GetRange(CameraControl_Pan, &pan_min, &pan_max,
-                                       &step, &default_value, &flags);
-    if (FAILED(hr)) {
-        blog(LOG_ERROR, "Failed to get Pan range: %ld", hr);
-        return;
+        HRESULT hr = cam_control_->Set(CameraControl_Pan, mapped_value, CameraControl_Flags_Manual);
+        if (FAILED(hr)) {
+            blog(LOG_ERROR, "Failed to set Pan: %ld (mapped value: %ld)", hr, mapped_value);
+            return false;
+        }
+        return true;
     }
+    bool tilt(double value) override {
+        if (!cam_control_) return false;
+        value = std::clamp(value, -1.0, 1.0);
+        long mapped_value = static_cast<long>(value * max[PTZAxis::PTZ_TILT]);
+        mapped_value = std::clamp(mapped_value, min[PTZAxis::PTZ_TILT], max[PTZAxis::PTZ_TILT]);
 
-    value = std::clamp(value, -1.0, 1.0);
-    long mapped_value = static_cast<long>(value * pan_max);
-    mapped_value = std::clamp(mapped_value, pan_min, pan_max);
-
-    hr = cam_control->Set(CameraControl_Pan, mapped_value, CameraControl_Flags_Manual);
-    if (FAILED(hr)) {
-        blog(LOG_ERROR, "Failed to set Pan: %ld (mapped value: %ld)", hr, mapped_value);
+        HRESULT hr = cam_control_->Set(CameraControl_Tilt, mapped_value, CameraControl_Flags_Manual);
+        if (FAILED(hr)) {
+            blog(LOG_ERROR, "Failed to set Tilt: %ld (mapped value: %ld)", hr, mapped_value);
+            return false;
+        }
+        return true;
     }
-}
+    bool zoom(double value) override {
+        if (!cam_control_) return false;
+        value = std::clamp(value, 0.0, 1.0);
+        long mapped_value = static_cast<long>(value * max[PTZAxis::PTZ_ZOOM]);
+        mapped_value = std::clamp(mapped_value, min[PTZAxis::PTZ_ZOOM], max[PTZAxis::PTZ_ZOOM]);
 
-void DirectShowCache::setTilt(const std::string &device_name, double value) {
-    IAMCameraControl *cam_control = getCamControl(device_name);
-    if (!cam_control) return;
-
-    long tilt_min, tilt_max, step, default_value, flags;
-    HRESULT hr = cam_control->GetRange(CameraControl_Tilt, &tilt_min, &tilt_max,
-                                       &step, &default_value, &flags);
-    if (FAILED(hr)) {
-        blog(LOG_ERROR, "Failed to get Tilt range: %ld", hr);
-        return;
+        HRESULT hr = cam_control_->Set(CameraControl_Zoom, mapped_value, CameraControl_Flags_Manual);
+        if (FAILED(hr)) {
+            blog(LOG_ERROR, "Failed to set Zoom: %ld (mapped value: %ld)", hr, mapped_value);
+            return false;
+        }
+        return true;
     }
+    bool focus(double value) override {
+        if (!cam_control_) return false;
+        value = std::clamp(value, 0.0, 1.0);
+        long mapped_value = static_cast<long>(value * max[PTZAxis::PTZ_FOCUS]);
+        mapped_value = std::clamp(mapped_value, min[PTZAxis::PTZ_FOCUS], max[PTZAxis::PTZ_FOCUS]);
 
-    value = std::clamp(value, -1.0, 1.0);
-    long mapped_value = static_cast<long>(value * tilt_max);
-    mapped_value = std::clamp(mapped_value, tilt_min, tilt_max);
-
-    hr = cam_control->Set(CameraControl_Tilt, mapped_value, CameraControl_Flags_Manual);
-    if (FAILED(hr)) {
-        blog(LOG_ERROR, "Failed to set Tilt: %ld (mapped value: %ld)", hr, mapped_value);
+        HRESULT hr = cam_control_->Set(CameraControl_Focus, mapped_value, CameraControl_Flags_Manual);
+        if (FAILED(hr)) {
+            blog(LOG_ERROR, "Failed to set Focus: %ld (mapped value: %ld)", hr, mapped_value);
+            return false;
+        }
+        return true;
     }
-}
-
-void DirectShowCache::setZoom(const std::string &device_name, double value) {
-    IAMCameraControl *cam_control = getCamControl(device_name);
-    if (!cam_control) return;
-
-    long zoom_min, zoom_max, step, default_value, flags;
-    HRESULT hr = cam_control->GetRange(CameraControl_Zoom, &zoom_min, &zoom_max,
-                                       &step, &default_value, &flags);
-    if (FAILED(hr)) {
-        blog(LOG_ERROR, "Failed to get Zoom range: %ld", hr);
-        return;
+    bool setAutoFocus(bool enabled) override {
+        if (!cam_control_) return false;
+        HRESULT hr;
+        if(!enabled) {
+            hr = cam_control_->Set(CameraControl_Focus, last_focus, CameraControl_Flags_Manual);
+        } else {
+            hr = cam_control_->Set(CameraControl_Focus, 0, CameraControl_Flags_Auto);
+        }
+        if (FAILED(hr)) {
+            blog(LOG_ERROR, "Failed to set AutoFocus: %ld", hr);
+            return false;
+        }
+        return true;
     }
-
-    value = std::clamp(value, 0.0, 1.0);
-    long mapped_value = static_cast<long>(value * zoom_max);
-    mapped_value = std::clamp(mapped_value, zoom_min, zoom_max);
-
-    hr = cam_control->Set(CameraControl_Zoom, mapped_value, CameraControl_Flags_Manual);
-    if (FAILED(hr)) {
-        blog(LOG_ERROR, "Failed to set Zoom: %ld (mapped value: %ld)", hr, mapped_value);
+    ~DirectShowControl() override {
+        if (cam_control_) {
+            cam_control_->Release();
+        }
+        if (filter_) {
+            filter_->Release();
+        }
     }
-}
-
-void DirectShowCache::setAutoFocus(const std::string &device_name) {
-    IAMCameraControl *cam_control = getCamControl(device_name);
-    if (!cam_control) return;
-
-    HRESULT hr = cam_control->Set(CameraControl_Focus, 0, CameraControl_Flags_Auto);
-    if (FAILED(hr)) {
-        blog(LOG_ERROR, "Failed to set AutoFocus: %ld", hr);
+    std::string getDevicePath() const override {
+        return device_path;
     }
-}
-
-void DirectShowCache::setFocus(const std::string &device_name, double value) {
-    IAMCameraControl *cam_control = getCamControl(device_name);
-    if (!cam_control) return;
-
-    long focus_min, focus_max, step, default_value, flags;
-    HRESULT hr = cam_control->GetRange(CameraControl_Focus, &focus_min, &focus_max,
-                                       &step, &default_value, &flags);
-    if (FAILED(hr)) {
-        blog(LOG_ERROR, "Failed to get Focus range: %ld", hr);
-        return;
+    bool isValid() const override {
+        return cam_control_ != nullptr;
     }
-
-    value = std::clamp(value, 0.0, 1.0);
-    long mapped_value = static_cast<long>(value * focus_max);
-    mapped_value = std::clamp(mapped_value, focus_min, focus_max);
-
-    hr = cam_control->Set(CameraControl_Focus, mapped_value, CameraControl_Flags_Manual);
-    if (FAILED(hr)) {
-        blog(LOG_ERROR, "Failed to set Focus: %ld (mapped value: %ld)", hr, mapped_value);
-    }
-}
+};
 
 #endif
 
@@ -285,17 +410,8 @@ obs_properties_t *PTZUSBCam::get_obs_properties()
 {
 	obs_properties_t *ptz_props = PTZDevice::get_obs_properties();
 	obs_properties_remove_by_name(ptz_props, "interface");
-	//log_source_settings();
 	return ptz_props;
 }
-
-#define PTZ_PAN_ABSOLUTE "Pan, Absolute"
-#define PTZ_TILT_ABSOLUTE "Tilt, Absolute"
-#define PTZ_ZOOM_ABSOLUTE "Zoom, Absolute"
-#define PTZ_FOCUS_AUTO "Focus, Automatic Continuous"
-#define PTZ_FOCUS_ABSOLUTE "Focus, Absolute"
-#define PTZ_WHITE_BALANCE_TEMP_AUTO "White Balance, Automatic"
-#define PTZ_WHITE_BALANCE_TEMP "White Balance Temperature"
 
 void PTZUSBCam::do_update()
 {
@@ -319,54 +435,53 @@ void PTZUSBCam::ptz_tick(float seconds) {
     tick_elapsed = 0.0f; // Reseta após a atualização
 }
 
-// Autorelease object definitions
-inline void ___properties_dummy_addref(obs_properties_t *) {}
-using OBSPropertiesAutoDestroy = OBSRef<obs_properties_t *, ___properties_dummy_addref, obs_properties_destroy>;
+void PTZUSBCam::initialize_and_check_ptz_control()
+{
+    std::string video_device_id = "";
+    obs_source_t *src = obs_get_source_by_name(QT_TO_UTF8(objectName()));
+    if (src) {
+        obs_data_t *psettings = obs_source_get_settings(src);
+        if (psettings) {
+#ifdef _WIN32
+            video_device_id = obs_data_get_string(psettings, "video_device_id");
+#endif
+#ifdef __linux__
+            video_device_id = obs_data_get_string(psettings, "device_id");
+#endif
+            obs_data_release(psettings);
+        }
+        obs_source_release(src);
+    }
+
+    if(ptz_control_ != NULL && ptz_control_->isValid() &&
+       ptz_control_->getDevicePath() == video_device_id) {
+        return;
+    }
+    if(ptz_control_ != NULL) {
+        delete ptz_control_;
+        ptz_control_ = nullptr;
+    }
+    if(video_device_id.empty()) {
+        return;
+    }
+#ifdef __linux__
+    ptz_control_ = new V4L2Control(video_device_id);
+#endif
+#ifdef _WIN32
+    ptz_control_ = new DirectShowControl(video_device_id);
+#endif
+}
 
 void PTZUSBCam::pantilt_abs(double pan, double tilt)
 {
+    initialize_and_check_ptz_control();
     now_pos.pan = std::clamp(pan, -1.0, 1.0);
     now_pos.tilt = std::clamp(tilt, -1.0, 1.0);
 
-    OBSSourceAutoRelease src = obs_get_source_by_name(QT_TO_UTF8(objectName()));
-    if (!src)
-        return;
-    OBSPropertiesAutoDestroy pprops = obs_source_properties(src);
-    if (!pprops)
-        return;
-    OBSDataAutoRelease psettings = obs_source_get_settings(src);
-    if (!psettings)
-        return;
-
-#ifdef _WIN32
-    const char *video_device_id = obs_data_get_string(psettings, "video_device_id");
-    if (!video_device_id || strlen(video_device_id) == 0) {
-        blog(LOG_WARNING, "No valid video_device_id found in settings");
-        return;
+    if(ptz_control_ != NULL && ptz_control_->isValid()) {
+        ptz_control_->pan(now_pos.pan);
+        ptz_control_->tilt(now_pos.tilt);
     }
-    ds_cache_.setPan(video_device_id, now_pos.pan);
-    ds_cache_.setTilt(video_device_id, now_pos.tilt);
-#else
-    obs_property_t *pan_prop = obs_properties_get(pprops, PTZ_PAN_ABSOLUTE);
-    if (!pan_prop || obs_property_get_type(pan_prop) != OBS_PROPERTY_INT)
-        return;
-    int min = obs_property_int_min(pan_prop);
-    int max = obs_property_int_max(pan_prop);
-    int i_pan = std::clamp(static_cast<int>(now_pos.pan * max), min, max);
-    obs_data_set_int(psettings, PTZ_PAN_ABSOLUTE, i_pan);
-    obs_property_modified(pan_prop, psettings);
-
-    obs_property_t *tilt_prop = obs_properties_get(pprops, PTZ_TILT_ABSOLUTE);
-    if (!tilt_prop || obs_property_get_type(tilt_prop) != OBS_PROPERTY_INT)
-        return;
-    min = obs_property_int_min(tilt_prop);
-    max = obs_property_int_max(tilt_prop);
-    int i_tilt = std::clamp(static_cast<int>(now_pos.tilt * max), min, max);
-    obs_data_set_int(psettings, PTZ_TILT_ABSOLUTE, i_tilt);
-    obs_property_modified(tilt_prop, psettings);
-
-    obs_source_update(src, psettings);
-#endif
 }
 
 void PTZUSBCam::pantilt_rel(double pan, double tilt)
@@ -381,108 +496,30 @@ void PTZUSBCam::pantilt_home()
 
 void PTZUSBCam::zoom_abs(double pos)
 {
+    initialize_and_check_ptz_control();
     now_pos.zoom = std::clamp(pos, 0.0, 1.0);
-
-    OBSSourceAutoRelease src = obs_get_source_by_name(QT_TO_UTF8(objectName()));
-    if (!src)
-        return;
-    OBSPropertiesAutoDestroy pprops = obs_source_properties(src);
-    if (!pprops)
-        return;
-    OBSDataAutoRelease psettings = obs_source_get_settings(src);
-    if (!psettings)
-        return;
-
-#ifdef _WIN32
-    const char *video_device_id = obs_data_get_string(psettings, "video_device_id");
-    if (!video_device_id || strlen(video_device_id) == 0) {
-        blog(LOG_WARNING, "No valid video_device_id found in settings");
-        return;
+    if(ptz_control_ != NULL && ptz_control_->isValid()) {
+        ptz_control_->zoom(now_pos.zoom);
     }
-    ds_cache_.setZoom(video_device_id, now_pos.zoom);
-#else
-    obs_property_t *zoom_prop = obs_properties_get(pprops, PTZ_ZOOM_ABSOLUTE);
-    if (!zoom_prop || obs_property_get_type(zoom_prop) != OBS_PROPERTY_INT)
-        return;
-    int min = obs_property_int_min(zoom_prop);
-    int max = obs_property_int_max(zoom_prop);
-    int i_zoom = std::clamp(static_cast<int>(now_pos.zoom * max), min, max);
-    obs_data_set_int(psettings, PTZ_ZOOM_ABSOLUTE, i_zoom);
-    obs_property_modified(zoom_prop, psettings);
-
-    obs_source_update(src, psettings);
-#endif
 }
 
 void PTZUSBCam::focus_abs(double pos)
 {
+    initialize_and_check_ptz_control();
     now_pos.focus = std::clamp(pos, 0.0, 1.0);
-
-    OBSSourceAutoRelease src = obs_get_source_by_name(QT_TO_UTF8(objectName()));
-    if (!src)
-        return;
-    OBSPropertiesAutoDestroy pprops = obs_source_properties(src);
-    if (!pprops)
-        return;
-    OBSDataAutoRelease psettings = obs_source_get_settings(src);
-    if (!psettings)
-        return;
-
-#ifdef _WIN32
-    const char *video_device_id = obs_data_get_string(psettings, "video_device_id");
-    if (!video_device_id || strlen(video_device_id) == 0) {
-        blog(LOG_WARNING, "No valid video_device_id found in settings");
-        return;
+    if(ptz_control_ != NULL && ptz_control_->isValid()) {
+        ptz_control_->focus(now_pos.focus);
     }
-    ds_cache_.setFocus(video_device_id, now_pos.focus);
-#else
-    obs_property_t *focus_prop = obs_properties_get(pprops, PTZ_FOCUS_ABSOLUTE);
-    if (!focus_prop || obs_property_get_type(focus_prop) != OBS_PROPERTY_INT)
-        return;
-    int min = obs_property_int_min(focus_prop);
-    int max = obs_property_int_max(focus_prop);
-    int i_focus = std::clamp(static_cast<int>(now_pos.focus * max), min, max);
-    obs_data_set_int(psettings, PTZ_FOCUS_ABSOLUTE, i_focus);
-    obs_property_modified(focus_prop, psettings);
-
-    obs_source_update(src, psettings);
-#endif
+    return;
 }
 
 void PTZUSBCam::set_autofocus(bool enabled)
 {
+    initialize_and_check_ptz_control();
     now_pos.focusAuto = enabled;
-
-    OBSSourceAutoRelease src = obs_get_source_by_name(QT_TO_UTF8(objectName()));
-    if (!src)
-        return;
-    OBSPropertiesAutoDestroy pprops = obs_source_properties(src);
-    if (!pprops)
-        return;
-    OBSDataAutoRelease psettings = obs_source_get_settings(src);
-    if (!psettings)
-        return;
-
-#ifdef _WIN32
-    const char *video_device_id = obs_data_get_string(psettings, "video_device_id");
-    if (!video_device_id || strlen(video_device_id) == 0) {
-        blog(LOG_WARNING, "No valid video_device_id found in settings");
-        return;
+    if(ptz_control_ != NULL && ptz_control_->isValid()) {
+        ptz_control_->setAutoFocus(enabled);
     }
-    if(enabled) {
-        ds_cache_.setAutoFocus(video_device_id);
-    } else {
-        ds_cache_.setFocus(video_device_id, now_pos.focus);
-    }
-#else
-    obs_property_t *focus_prop = obs_properties_get(pprops, PTZ_FOCUS_AUTO);
-    if (!focus_prop || obs_property_get_type(focus_prop) != OBS_PROPERTY_BOOL)
-        return;
-    obs_data_set_bool(psettings, PTZ_FOCUS_AUTO, now_pos.focusAuto);
-    obs_property_modified(focus_prop, psettings);
-
-    obs_source_update(src, psettings);
-#endif
 }
 
 void PTZUSBCam::memory_reset(int i)
@@ -508,42 +545,4 @@ void PTZUSBCam::memory_recall(int i)
     set_autofocus(now_pos.focusAuto);
     if (!now_pos.focusAuto)
         focus_abs(now_pos.focus);
-}
-
-void PTZUSBCam::log_source_settings() {
-    OBSSourceAutoRelease src = obs_get_source_by_name(QT_TO_UTF8(objectName()));
-    if (!src)
-        return;
-    OBSDataAutoRelease psettings = obs_source_get_settings(src);
-    blog(LOG_INFO, "PTZ: Settings for source '%s':", obs_source_get_name(src));
-
-    // Iterar sobre todas as chaves no obs_data_t
-    obs_data_item_t* item = obs_data_first(psettings);
-    for (; item != nullptr; obs_data_item_next(&item)) {
-        const char* key = obs_data_item_get_name(item);
-        switch (obs_data_item_gettype(item)) {
-            case OBS_DATA_STRING:
-                blog(LOG_INFO, "  %s: %s", key, obs_data_get_string(psettings, key));
-                break;
-            case OBS_DATA_NUMBER:
-                if (obs_data_item_numtype(item) == OBS_DATA_NUM_INT) {
-                    blog(LOG_INFO, "  %s: %lld (int)", key, obs_data_get_int(settings, key));
-                } else {
-                    blog(LOG_INFO, "  %s: %f (double)", key, obs_data_get_double(settings, key));
-                }
-                break;
-            case OBS_DATA_BOOLEAN:
-                blog(LOG_INFO, "  %s: %s (bool)", key, obs_data_get_bool(settings, key) ? "true" : "false");
-                break;
-            case OBS_DATA_ARRAY:
-                blog(LOG_INFO, "  %s: [array]", key);
-                break;
-            case OBS_DATA_OBJECT:
-                blog(LOG_INFO, "  %s: [object]", key);
-                break;
-            default:
-                blog(LOG_INFO, "  %s: [unknown type]", key);
-                break;
-        }
-    }
 }
