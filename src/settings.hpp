@@ -19,7 +19,7 @@ class SourceNameDelegate : public QStyledItemDelegate {
 
 public:
 	SourceNameDelegate(QObject *parent = nullptr)
-		: QStyledItemDelegate(parent){};
+		: QStyledItemDelegate(parent) {};
 	virtual QString displayText(const QVariant &value,
 				    const QLocale &locale) const;
 };
