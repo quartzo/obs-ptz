@@ -462,19 +462,23 @@ void PTZUSBCam::ptz_tick(float seconds)
 	tick_elapsed += seconds;
 	if (tick_elapsed < 0.03f)
 		return;
-	auto ptzctrl = get_ptz_control();
-	if (ptzctrl == nullptr) {
-		return;
-	}
 	if (pan_speed != 0.0 || tilt_speed != 0.0) {
 		pantilt_rel(pan_speed * tick_elapsed,
 			    tilt_speed * tick_elapsed);
 	}
 	if (zoom_speed != 0.0) {
-		zoom_abs(ptzctrl->getZoom() + zoom_speed * tick_elapsed);
+		auto ptzctrl = get_ptz_control();
+		if (ptzctrl) {
+			zoom_abs(ptzctrl->getZoom() +
+				 zoom_speed * tick_elapsed);
+		}
 	}
 	if (focus_speed != 0.0) {
-		focus_abs(ptzctrl->getFocus() + focus_speed * tick_elapsed);
+		auto ptzctrl = get_ptz_control();
+		if (ptzctrl) {
+			focus_abs(ptzctrl->getFocus() +
+				  focus_speed * tick_elapsed);
+		}
 	}
 	tick_elapsed = 0.0f;
 }
